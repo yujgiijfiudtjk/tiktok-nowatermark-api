@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-/* ─── ব্রাউজার হেডার্স (টিকটক ব্লকিং এড়ানোর জন্য) ────────────────── */
+/* ─── ব্রাউজার হেডারส์ (টিকটক ব্লকিং এড়ানোর জন্য) ────────────────── */
 const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Accept": "application/json, text/plain, */*",
@@ -36,6 +36,48 @@ function getDateInfo(timestamp) {
 }
 
 /* ───────────────────────────────────────────────────────────────
+   🌟 নতুন যুক্ত হওয়া প্রক্সি ডাউনলোডার রাউট (/stream)
+   এটি ব্রাউজারে ফাইল প্লে হওয়া বন্ধ করে সরাসরি ডাউনলোড নিশ্চিত করবে
+   ─────────────────────────────────────────────────────────────── */
+app.get("/stream", async (req, res) => {
+  const fileUrl = req.query.url;
+  const type = req.query.type || "video"; // video অথবা music
+
+  if (!fileUrl) {
+    return res.status(400).send("ফাইলের ইউআরএল প্রয়োজন।");
+  }
+
+  try {
+    // টিকটকের এপিআই সার্ভার থেকে ফাইলটি স্ট্রিম আকারে রিকোয়েস্ট করা
+    const fileStream = await axios({
+      method: "get",
+      url: fileUrl,
+      headers: BROWSER_HEADERS,
+      responseType: "stream",
+      timeout: 20000
+    });
+
+    // ব্রাউজারকে বাধ্য করার জন্য প্রয়োজনীয় রেসপন্স হেডার সেট করা
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    
+    if (type === "music") {
+      res.setHeader("Content-Disposition", 'attachment; filename="tiktok_audio.mp3"');
+      res.setHeader("Content-Type", "audio/mpeg");
+    } else {
+      res.setHeader("Content-Disposition", 'attachment; filename="tiktok_video.mp4"');
+      res.setHeader("Content-Type", "video/mp4");
+    }
+
+    // ফাইলটি সরাসরি ইউজারের ব্রাউজারে পাইপ (Pipe) বা পুশ করে দেওয়া
+    fileStream.data.pipe(res);
+
+  } catch (error) {
+    console.error("Streaming Error:", error.message);
+    res.status(500).send("ফাইলটি ডাউনলোড করতে সমস্যা হয়েছে। দয়া করে আবার চেষ্টা করুন।");
+  }
+});
+
+/* ───────────────────────────────────────────────────────────────
    ১. ট্যাব ১: সিঙ্গেল ভিডিও ডাউনলোডার এন্ডপয়েন্ট (/download)
    ─────────────────────────────────────────────────────────────── */
 app.get("/download", async (req, res) => {
@@ -45,22 +87,26 @@ app.get("/download", async (req, res) => {
   }
 
   try {
-    // tikwm এর মাধ্যমে নো-ওয়াটারমার্ক ডিরেক্ট লিংক আনা
     const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(videoUrl)}&hd=1`;
     const response = await axios.get(apiUrl, { headers: BROWSER_HEADERS, timeout: 10000 });
     const data = response.data;
 
     if (data.code === 0 && data.data) {
       const v = data.data;
+      
+      // আপনার নিজস্ব এপিআই এর ডোমেইন (যেমন: Render বা Localhost)
+      const host = `${req.protocol}://${req.get("host")}`;
+
+      // লিংকগুলোকে আমাদের নতুন প্রক্সি রাউটের মাধ্যমে রি-রুট করা হলো
       return res.json({
         success: true,
         title: v.title || "TikTok Video",
         author: v.author?.unique_id || "Unknown",
         author_name: v.author?.nickname || "Unknown",
         cover_image: v.cover,
-        download_url_no_watermark: v.play,
-        download_url_hd: v.hdplay || v.play,
-        music_url: v.music
+        download_url_no_watermark: `${host}/stream?type=video&url=${encodeURIComponent(v.play)}`,
+        download_url_hd: `${host}/stream?type=video&url=${encodeURIComponent(v.hdplay || v.play)}`,
+        music_url: v.music ? `${host}/stream?type=music&url=${encodeURIComponent(v.music)}` : null
       });
     } else {
       return res.status(404).json({ success: false, error: "ভিডিওর ডেটা পাওয়া যায়নি বা লিংকটি ভুল।" });
@@ -82,19 +128,21 @@ app.get("/user", async (req, res) => {
   const cleanUser = username.replace("@", "").trim();
 
   try {
-    // এখানে count=50 দেওয়া হয়েছে যাতে একসাথে ৫০টি ভিডিও লোড হয় (২০টির লিমিট ভাঙার জন্য)
     const apiUrl = `https://www.tikwm.com/api/user/posts?unique_id=${cleanUser}&count=50`;
     const response = await axios.get(apiUrl, { headers: BROWSER_HEADERS, timeout: 12000 });
     const data = response.data;
 
     if (data.code === 0 && data.data && data.data.videos) {
+      const host = `${req.protocol}://${req.get("host")}`;
+
       const videoList = data.data.videos.map(video => ({
         video_id: video.video_id,
         title: video.title || "No Title",
         cover_image: video.cover,
         views: video.play_count || 0,
         likes: video.digg_count || 0,
-        download_url_no_watermark: video.play
+        // এখানেও ডাউনলোড লিংক প্রক্সি রাউটে পাঠানো হলো
+        download_url_no_watermark: `${host}/stream?type=video&url=${encodeURIComponent(video.play)}`
       }));
 
       return res.json({
@@ -104,7 +152,6 @@ app.get("/user", async (req, res) => {
         videos: videoList
       });
     } else {
-      // যদি tikwm ব্লক থাকে, তবে ব্যাকআপ হিসেবে ওএম্বেড (oEmbed) মেথড কাজ করবে
       const fallback = await axios.get(`https://www.tiktok.com/oembed?url=https://www.tiktok.com/@${cleanUser}`, { timeout: 8000 });
       if (fallback.data && fallback.data.author_name) {
         return res.json({
@@ -137,7 +184,6 @@ app.get("/comments", async (req, res) => {
   }
 
   try {
-    // এখানে count=50 করা হয়েছে যাতে ২০টির চেয়ে বেশি কমেন্ট একসাথে আসে
     const apiUrl = `https://www.tikwm.com/api/comment/list?url=${encodeURIComponent(videoUrl)}&count=50`;
     const response = await axios.get(apiUrl, { headers: BROWSER_HEADERS, timeout: 12000 });
     const data = response.data;
@@ -205,7 +251,6 @@ app.get("/user/info", async (req, res) => {
         accountAge: timeInfo.accountAge
       });
     } else {
-      // ওএম্বেড ব্যাকআপ প্রোফাইলের জন্য
       const fallback = await axios.get(`https://www.tiktok.com/oembed?url=https://www.tiktok.com/@${cleanUser}`, { timeout: 8000 });
       if (fallback.data && fallback.data.author_name) {
         return res.json({
@@ -238,4 +283,4 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server hosted successfully on port ${PORT}`);
 });
-                                              
+          
