@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   TokLens — Multi-Platform Downloader API
+   TokLens — Multi-Platform Downloader API  (FIXED 2026)
    Platforms: TikTok · Facebook · Instagram · Pinterest · YouTube
    Author: RX HASNAT
    ─── এই একটি ফাইল পুরনো server.js এর জায়গায় বসিয়ে দিন ───
@@ -34,6 +34,20 @@ const TT_HEADERS = {
   "Referer": "https://www.tiktok.com/"
 };
 
+/* ─── HTML entity decode helper ─────────────────────────────── */
+function decodeHtml(str) {
+  if (!str) return str;
+  return String(str)
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&#x2F;/g, '/')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\\\//g, '/')
+    .replace(/\\u0026/g, '&');
+}
+
 /* ─── retry সহ axios GET ─────────────────────────────────────── */
 async function fetchWithRetry(url, options = {}, retries = 2) {
   for (let i = 0; i <= retries; i++) {
@@ -41,7 +55,8 @@ async function fetchWithRetry(url, options = {}, retries = 2) {
       const res = await axios.get(url, {
         headers: options.headers || TT_HEADERS,
         timeout: options.timeout || 20000,
-        ...options
+        maxRedirects: options.maxRedirects != null ? options.maxRedirects : 5,
+        validateStatus: s => s >= 200 && s < 400
       });
       return res;
     } catch (err) {
@@ -53,7 +68,7 @@ async function fetchWithRetry(url, options = {}, retries = 2) {
 
 /* ─── retry সহ axios POST (form) ─────────────────────────────── */
 async function postWithRetry(url, form, options = {}, retries = 2) {
-  const body = new URLSearchParams(form).toString();
+  const body = (typeof form === 'string') ? form : new URLSearchParams(form).toString();
   for (let i = 0; i <= retries; i++) {
     try {
       const res = await axios.post(url, body, {
@@ -61,7 +76,29 @@ async function postWithRetry(url, form, options = {}, retries = 2) {
           ...(options.headers || BROWSER_HEADERS),
           "Content-Type": "application/x-www-form-urlencoded"
         },
-        timeout: options.timeout || 25000
+        timeout: options.timeout || 25000,
+        validateStatus: s => s >= 200 && s < 400
+      });
+      return res;
+    } catch (err) {
+      if (i === retries) throw err;
+      await new Promise(r => setTimeout(r, 900 * (i + 1)));
+    }
+  }
+}
+
+/* ─── retry সহ axios POST (json) ─────────────────────────────── */
+async function postJsonWithRetry(url, jsonBody, options = {}, retries = 2) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await axios.post(url, jsonBody, {
+        headers: {
+          ...(options.headers || BROWSER_HEADERS),
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        timeout: options.timeout || 25000,
+        validateStatus: s => s >= 200 && s < 400
       });
       return res;
     } catch (err) {
@@ -135,7 +172,7 @@ app.get("/download", async (req, res) => {
 });
 
 /* ───────────────────────────────────────────────────────────────
-   ২. TikTok — ইউজারের সব ভিডিও (/user)
+   ২. TikTok — ইউজারের সব ভিডিও (/user)   [অপরিবর্তিত]
    ─────────────────────────────────────────────────────────────── */
 app.get("/user", async (req, res) => {
   const username = req.query.username;
@@ -208,7 +245,7 @@ app.get("/user", async (req, res) => {
 });
 
 /* ───────────────────────────────────────────────────────────────
-   ৩. TikTok — কমেন্ট স্ক্র্যাপার (/comments)
+   ৩. TikTok — কমেন্ট স্ক্র্যাপার (/comments)   [অপরিবর্তিত]
    ─────────────────────────────────────────────────────────────── */
 app.get("/comments", async (req, res) => {
   const videoUrl = req.query.url;
@@ -240,7 +277,7 @@ app.get("/comments", async (req, res) => {
 });
 
 /* ───────────────────────────────────────────────────────────────
-   ৪. TikTok — প্রোফাইল ইনফো (/user/info)
+   ৪. TikTok — প্রোফাইল ইনফো (/user/info)   [অপরিবর্তিত]
    ─────────────────────────────────────────────────────────────── */
 app.get("/user/info", async (req, res) => {
   const username = req.query.username;
@@ -291,30 +328,10 @@ app.get("/user/info", async (req, res) => {
 });
 
 /* ═══════════════════════════════════════════════════════════════
-   ৫. Facebook / Instagram / Pinterest / YouTube ডাউনলোডার
-   ── SnapSave / SnapDownloader / RapidSave ব্যাকএন্ড proxy ────
+   ৫. Facebook / Instagram / Pinterest / YouTube — FIXED
    ═══════════════════════════════════════════════════════════════ */
 
-/* সহায়ক: JSON থেকে best video url বের করা */
-function pickBestFromRapidCdn(data){
-  if (!data || typeof data !== 'object') return null;
-  // চেষ্টা: data.medias কে iterate করি
-  const medias = data.medias || data.data || data.links || [];
-  const list = Array.isArray(medias) ? medias : [];
-  let best = null;
-  for (const m of list) {
-    const url = m.url || m.link || m.download_url;
-    if (!url) continue;
-    const q = (m.quality || m.label || m.resolution || '').toString().toLowerCase();
-    const type = (m.type || m.extension || '').toString().toLowerCase();
-    if (type.includes('audio') || url.match(/\.(m4a|mp3)($|\?)/i)) continue;
-    if (!best) best = { url, quality: q || 'sd' };
-    if (q.includes('hd') || q.includes('720') || q.includes('1080')) return { url, quality: q };
-  }
-  return best;
-}
-
-/* ────────── Facebook Reels/Posts (/fb) ────────── */
+/* ────────── Facebook Reels/Posts (/fb) — FIXED ────────── */
 app.get("/fb", async (req, res) => {
   const videoUrl = req.query.url;
   if (!videoUrl) return res.status(400).json({ success: false, error: "Facebook video URL প্রদান করুন।" });
@@ -322,54 +339,121 @@ app.get("/fb", async (req, res) => {
     return res.status(400).json({ success: false, error: "সঠিক Facebook লিংক দিন।" });
   }
 
-  // পদ্ধতি ১: snapsave.app JSON endpoint
+  const attempts = [];
+
+  /* পদ্ধতি ১: fdown.net (সবচেয়ে stable 2026) */
   try {
-    const r = await postWithRetry("https://snapsave.app/action.php?lang=en", { url: videoUrl }, {
-      headers: { ...BROWSER_HEADERS, "Origin": "https://snapsave.app", "Referer": "https://snapsave.app/" }
+    const r = await postWithRetry("https://fdown.net/download.php", { URLz: videoUrl }, {
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://fdown.net",
+        "Referer": "https://fdown.net/",
+        "Accept": "text/html,application/xhtml+xml"
+      }
     });
-    const html = typeof r.data === 'string' ? r.data : (r.data && r.data.data) || '';
-    const links = [];
-    const re = /href="(https?:\/\/[^"]+?\.mp4[^"]*)"/gi;
-    let m;
-    while ((m = re.exec(html)) !== null) links.push(m[1].replace(/&amp;/g, '&'));
-    // Thumbnail
-    const thumbMatch = html.match(/<img[^>]+src="(https?:\/\/[^"]+?\.(?:jpg|jpeg|webp|png)[^"]*)"/i);
-    if (links.length) {
+    const html = typeof r.data === 'string' ? r.data : '';
+    // fdown এ HD এবং SD link সরাসরি href এ থাকে
+    const hd = html.match(/id=["']hdlink["'][^>]*href=["']([^"']+)["']/i) ||
+               html.match(/href=["']([^"']+)["'][^>]*id=["']hdlink["']/i);
+    const sd = html.match(/id=["']sdlink["'][^>]*href=["']([^"']+)["']/i) ||
+               html.match(/href=["']([^"']+)["'][^>]*id=["']sdlink["']/i);
+    const thumb = html.match(/<img[^>]+src=["'](https?:\/\/[^"']+\.(?:jpg|jpeg|webp|png)[^"']*)["']/i);
+    const title = html.match(/<p[^>]*id=["']sTitle["'][^>]*>([^<]+)<\/p>/i);
+
+    const hdUrl = hd ? decodeHtml(hd[1]) : null;
+    const sdUrl = sd ? decodeHtml(sd[1]) : null;
+
+    if (hdUrl || sdUrl) {
       return res.json({
         success: true, platform: "facebook",
-        title: "Facebook Video",
-        cover_image: thumbMatch ? thumbMatch[1].replace(/&amp;/g, '&') : null,
-        download_url_no_watermark: links[0],
-        download_url_hd: links[links.length > 1 ? 0 : 0],
-        download_url_sd: links[links.length - 1] || null
+        title: title ? decodeHtml(title[1].trim()) : "Facebook Video",
+        cover_image: thumb ? decodeHtml(thumb[1]) : null,
+        download_url_no_watermark: hdUrl || sdUrl,
+        download_url_hd: hdUrl || sdUrl,
+        download_url_sd: sdUrl || hdUrl
       });
     }
-  } catch (_) {}
+    attempts.push("fdown: no links");
+  } catch (e) { attempts.push("fdown err: " + (e.response ? e.response.status : e.code || 'net')); }
 
-  // পদ্ধতি ২: getmyfb.com
+  /* পদ্ধতি ২: snapsave.app (নতুন endpoint) */
+  try {
+    const r = await postWithRetry("https://snapsave.app/action.php?lang=en", { url: videoUrl }, {
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://snapsave.app",
+        "Referer": "https://snapsave.app/",
+        "X-Requested-With": "XMLHttpRequest"
+      }
+    });
+    // snapsave এখন { data: "<html>" } অথবা { status: 'ok', data: '<html>' } দেয়
+    let html = '';
+    if (typeof r.data === 'string') html = r.data;
+    else if (r.data && r.data.data) html = r.data.data;
+    else if (r.data && r.data.html) html = r.data.html;
+
+    const links = [];
+    // href="url.mp4"  বা data-href="url.mp4"
+    const re = /(?:href|data-href)=["'](https?:\/\/[^"']+?\.mp4[^"']*)["']/gi;
+    let m;
+    while ((m = re.exec(html)) !== null) links.push(decodeHtml(m[1]));
+    // <a ... href="...">HD</a> এর মতো markup পড়ে HD/SD আলাদা করা
+    const hdMatch = html.match(/href=["']([^"']+\.mp4[^"']*)["'][^>]*>[^<]*(?:HD|1080|720)/i);
+    const sdMatch = html.match(/href=["']([^"']+\.mp4[^"']*)["'][^>]*>[^<]*(?:SD|360|480)/i);
+    const thumbMatch = html.match(/<img[^>]+src=["'](https?:\/\/[^"']+?\.(?:jpg|jpeg|webp|png)[^"']*)["']/i);
+    const titleMatch = html.match(/<h3[^>]*>([^<]+)<\/h3>/i) || html.match(/<p[^>]*class=["'][^"']*title[^"']*["'][^>]*>([^<]+)</i);
+
+    const hd = hdMatch ? decodeHtml(hdMatch[1]) : null;
+    const sd = sdMatch ? decodeHtml(sdMatch[1]) : null;
+
+    if (hd || sd || links.length) {
+      return res.json({
+        success: true, platform: "facebook",
+        title: titleMatch ? decodeHtml(titleMatch[1].trim()) : "Facebook Video",
+        cover_image: thumbMatch ? decodeHtml(thumbMatch[1]) : null,
+        download_url_no_watermark: hd || links[0] || sd,
+        download_url_hd: hd || links[0] || null,
+        download_url_sd: sd || links[1] || links[0] || null
+      });
+    }
+    attempts.push("snapsave: no links");
+  } catch (e) { attempts.push("snapsave err: " + (e.response ? e.response.status : e.code || 'net')); }
+
+  /* পদ্ধতি ৩: getmyfb.com */
   try {
     const r = await postWithRetry("https://getmyfb.com/api/ajaxSearch", { q: videoUrl, lang: 'en' }, {
-      headers: { ...BROWSER_HEADERS, "Origin": "https://getmyfb.com", "Referer": "https://getmyfb.com/" }
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://getmyfb.com",
+        "Referer": "https://getmyfb.com/",
+        "X-Requested-With": "XMLHttpRequest"
+      }
     });
-    const html = (r.data && r.data.data) || '';
+    const html = (r.data && r.data.data) || (typeof r.data === 'string' ? r.data : '');
     const links = [];
-    const re = /href="(https?:\/\/[^"]+?\.mp4[^"]*)"/gi;
-    let m; while ((m = re.exec(html)) !== null) links.push(m[1].replace(/&amp;/g,'&'));
+    const re = /href=["'](https?:\/\/[^"']+?\.mp4[^"']*)["']/gi;
+    let m; while ((m = re.exec(html)) !== null) links.push(decodeHtml(m[1]));
+    const thumbMatch = html.match(/<img[^>]+src=["'](https?:\/\/[^"']+?\.(?:jpg|jpeg|webp|png)[^"']*)["']/i);
     if (links.length) {
       return res.json({
         success: true, platform: "facebook", title: "Facebook Video",
-        cover_image: null,
+        cover_image: thumbMatch ? decodeHtml(thumbMatch[1]) : null,
         download_url_hd: links[0],
         download_url_no_watermark: links[0],
         download_url_sd: links[1] || links[0]
       });
     }
-  } catch (_) {}
+    attempts.push("getmyfb: no links");
+  } catch (e) { attempts.push("getmyfb err: " + (e.response ? e.response.status : e.code || 'net')); }
 
-  return res.status(404).json({ success: false, error: "Facebook ভিডিও রিসলভ করা যায়নি। লিংকটি Public কিনা যাচাই করুন।" });
+  return res.status(404).json({
+    success: false,
+    error: "Facebook ভিডিও রিসলভ করা যায়নি। লিংকটি Public কিনা যাচাই করুন।",
+    debug: attempts
+  });
 });
 
-/* ────────── Instagram Post/Reel (/ig) ────────── */
+/* ────────── Instagram Post/Reel (/ig) — FIXED ────────── */
 app.get("/ig", async (req, res) => {
   const videoUrl = req.query.url;
   if (!videoUrl) return res.status(400).json({ success: false, error: "Instagram URL প্রদান করুন।" });
@@ -377,22 +461,36 @@ app.get("/ig", async (req, res) => {
     return res.status(400).json({ success: false, error: "সঠিক Instagram লিংক দিন।" });
   }
 
-  // পদ্ধতি ১: snapinsta.app
+  const attempts = [];
+
+  /* পদ্ধতি ১: snapinsta.app (নতুন 2026 endpoint) */
   try {
-    const r = await postWithRetry("https://snapinsta.app/api/ajaxSearch", { q: videoUrl, t: 'media', lang: 'en' }, {
-      headers: { ...BROWSER_HEADERS, "Origin": "https://snapinsta.app", "Referer": "https://snapinsta.app/" }
+    const r = await postWithRetry("https://snapinsta.app/api/ajaxSearch", {
+      q: videoUrl, t: 'media', lang: 'en'
+    }, {
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://snapinsta.app",
+        "Referer": "https://snapinsta.app/",
+        "X-Requested-With": "XMLHttpRequest"
+      }
     });
-    const html = (r.data && r.data.data) || '';
+    let html = '';
+    if (typeof r.data === 'string') html = r.data;
+    else if (r.data && r.data.data) html = r.data.data;
+    else if (r.data && r.data.html) html = r.data.html;
+
     const media = [];
-    const reMp4 = /href="(https?:\/\/[^"]+?\.mp4[^"]*)"/gi;
-    const reImg = /<img[^>]+src="(https?:\/\/[^"]+?\.(?:jpg|jpeg|webp|png)[^"]*)"/gi;
+    const reMp4 = /href=["'](https?:\/\/[^"']+?\.mp4[^"']*)["']/gi;
+    const reImg = /<img[^>]+src=["'](https?:\/\/[^"']+?\.(?:jpg|jpeg|webp|png)[^"']*)["']/gi;
     let m;
-    while ((m = reMp4.exec(html)) !== null) media.push({ type:'video', url: m[1].replace(/&amp;/g,'&') });
+    while ((m = reMp4.exec(html)) !== null) media.push({ type:'video', url: decodeHtml(m[1]) });
     let firstThumb = null;
     while ((m = reImg.exec(html)) !== null) {
-      const u = m[1].replace(/&amp;/g,'&');
+      const u = decodeHtml(m[1]);
+      if (/logo|icon|snapinsta/i.test(u)) continue;
       if (!firstThumb) firstThumb = u;
-      if (!/logo|icon/i.test(u)) media.push({ type:'image', url:u });
+      media.push({ type:'image', url:u });
     }
     if (media.length) {
       const firstVid = media.find(x => x.type === 'video');
@@ -404,63 +502,177 @@ app.get("/ig", async (req, res) => {
         media_list: media.slice(0, 20)
       });
     }
-  } catch (_) {}
+    attempts.push("snapinsta: no media");
+  } catch (e) { attempts.push("snapinsta err: " + (e.response ? e.response.status : e.code || 'net')); }
 
-  // পদ্ধতি ২: saveinsta.app
+  /* পদ্ধতি ২: saveinsta.app */
   try {
-    const r = await postWithRetry("https://saveinsta.app/core/ajax.php", { url: videoUrl, action: 'post', lang: 'en' }, {
-      headers: { ...BROWSER_HEADERS, "Origin": "https://saveinsta.app", "Referer": "https://saveinsta.app/" }
+    const r = await postWithRetry("https://saveinsta.app/core/ajax.php", {
+      url: videoUrl, action: 'post', lang: 'en'
+    }, {
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://saveinsta.app",
+        "Referer": "https://saveinsta.app/",
+        "X-Requested-With": "XMLHttpRequest"
+      }
     });
     const html = (r.data && (r.data.data || r.data.html)) || (typeof r.data === 'string' ? r.data : '');
     const links = [];
-    const re = /href="(https?:\/\/[^"]+?\.mp4[^"]*)"/gi;
-    let m; while ((m = re.exec(html)) !== null) links.push(m[1].replace(/&amp;/g,'&'));
+    const re = /href=["'](https?:\/\/[^"']+?\.mp4[^"']*)["']/gi;
+    let m; while ((m = re.exec(html)) !== null) links.push(decodeHtml(m[1]));
+    const thumbMatch = html.match(/<img[^>]+src=["'](https?:\/\/[^"']+?\.(?:jpg|jpeg|webp|png)[^"']*)["']/i);
     if (links.length) {
       return res.json({
         success: true, platform: "instagram", title: "Instagram Media",
-        cover_image: null,
+        cover_image: thumbMatch ? decodeHtml(thumbMatch[1]) : null,
         download_url_no_watermark: links[0],
         download_url_hd: links[0]
       });
     }
-  } catch (_) {}
+    attempts.push("saveinsta: no links");
+  } catch (e) { attempts.push("saveinsta err: " + (e.response ? e.response.status : e.code || 'net')); }
 
-  return res.status(404).json({ success: false, error: "Instagram media রিসলভ করা যায়নি। প্রোফাইলটি Public কিনা যাচাই করুন।" });
+  /* পদ্ধতি ৩: igram.world API */
+  try {
+    const r = await postJsonWithRetry("https://api.igram.world/api/convert", {
+      url: videoUrl
+    }, {
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://igram.world",
+        "Referer": "https://igram.world/"
+      }
+    });
+    const data = r.data;
+    if (Array.isArray(data) && data.length) {
+      const first = data[0];
+      const vidUrl = first.url && (first.url[0] && (first.url[0].url || first.url[0])) || first.download || first.url_download;
+      const thumb = first.thumb || first.thumbnail || null;
+      if (vidUrl) {
+        return res.json({
+          success: true, platform: "instagram", title: "Instagram Media",
+          cover_image: thumb,
+          download_url_no_watermark: vidUrl,
+          download_url_hd: vidUrl
+        });
+      }
+    }
+    attempts.push("igram: no data");
+  } catch (e) { attempts.push("igram err: " + (e.response ? e.response.status : e.code || 'net')); }
+
+  return res.status(404).json({
+    success: false,
+    error: "Instagram media রিসলভ করা যায়নি। প্রোফাইলটি Public কিনা যাচাই করুন।",
+    debug: attempts
+  });
 });
 
-/* ────────── Pinterest Post/Video (/pin) ────────── */
+/* ────────── Pinterest Post/Video (/pin) — FIXED ────────── */
+/*  ফিক্স: thumbnail (cover_image) + caption (title/description) দুইটাই বের করে   */
 app.get("/pin", async (req, res) => {
-  const videoUrl = req.query.url;
+  let videoUrl = req.query.url;
   if (!videoUrl) return res.status(400).json({ success: false, error: "Pinterest URL প্রদান করুন।" });
   if (!/pinterest\.com|pin\.it|pinterest\.[a-z]{2,3}/i.test(videoUrl)) {
     return res.status(400).json({ success: false, error: "সঠিক Pinterest লিংক দিন।" });
   }
 
-  // পদ্ধতি ১: Direct HTML স্ক্র্যাপিং
+  /* pin.it শর্ট লিংক হলে আগে resolve করি */
+  try {
+    if (/pin\.it/i.test(videoUrl)) {
+      const rr = await axios.get(videoUrl, {
+        headers: BROWSER_HEADERS,
+        maxRedirects: 5,
+        timeout: 15000,
+        validateStatus: s => s >= 200 && s < 400
+      });
+      if (rr.request && rr.request.res && rr.request.res.responseUrl) {
+        videoUrl = rr.request.res.responseUrl;
+      }
+    }
+  } catch (_) {}
+
+  /* পদ্ধতি ১: Direct HTML স্ক্র্যাপিং */
   try {
     const r = await fetchWithRetry(videoUrl, {
-      headers: { ...BROWSER_HEADERS, "Referer": "https://www.pinterest.com/" },
+      headers: {
+        ...BROWSER_HEADERS,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.pinterest.com/"
+      },
       maxRedirects: 5
     });
     const html = typeof r.data === 'string' ? r.data : '';
-    // JSON hunt
-    let videoUrlFound = null, imgUrlFound = null, title = "Pinterest Pin";
-    // ভিডিও URL
-    const vm = html.match(/"url":"(https:\\?\/\\?\/v\d?\.pinimg\.com\\?\/[^"]+?\.mp4[^"]*)"/i) ||
-               html.match(/(https:\/\/v\d?\.pinimg\.com\/[^"' ]+?\.mp4[^"'? ]*)/i);
-    if (vm && vm[1]) videoUrlFound = vm[1].replace(/\\\//g,'/').replace(/&amp;/g,'&');
-    // ইমেজ URL
-    const im = html.match(/"orig":\{"width":\d+,"height":\d+,"url":"(https:\\?\/\\?\/i\.pinimg\.com\\?\/[^"]+)"/i) ||
-               html.match(/property="og:image"\s+content="([^"]+)"/i);
-    if (im && im[1]) imgUrlFound = im[1].replace(/\\\//g,'/').replace(/&amp;/g,'&');
-    // টাইটেল
-    const tm = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
-    if (tm && tm[1]) title = tm[1];
+
+    let videoUrlFound = null, imgUrlFound = null;
+    let title = null, description = null;
+
+    /* ভিডিও URL */
+    const videoRegexes = [
+      /"url":"(https:\\?\/\\?\/v\d?\.pinimg\.com\\?\/[^"]+?\.mp4[^"]*)"/i,
+      /"video_list":\s*\{[^}]*"V_HLSV4":\s*\{[^}]*"url":"([^"]+\.m3u8[^"]*)"/i,
+      /(https:\/\/v\d?\.pinimg\.com\/[^"' ]+?\.mp4[^"'? ]*)/i
+    ];
+    for (const rx of videoRegexes) {
+      const vm = html.match(rx);
+      if (vm && vm[1]) { videoUrlFound = decodeHtml(vm[1]); break; }
+    }
+
+    /* ইমেজ URL (thumbnail) — একাধিক pattern চেষ্টা করি */
+    const imgRegexes = [
+      /"orig":\{"width":\d+,"height":\d+,"url":"(https:\\?\/\\?\/i\.pinimg\.com\\?\/[^"]+)"/i,
+      /"images":\{[^}]*"orig":\{[^}]*"url":"([^"]+)"/i,
+      /<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i,
+      /<meta\s+name=["']twitter:image["']\s+content=["']([^"']+)["']/i,
+      /"image_url":"([^"]+)"/i
+    ];
+    for (const rx of imgRegexes) {
+      const im = html.match(rx);
+      if (im && im[1]) { imgUrlFound = decodeHtml(im[1]); break; }
+    }
+
+    /* টাইটেল */
+    const titleRegexes = [
+      /<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i,
+      /<meta\s+name=["']twitter:title["']\s+content=["']([^"']+)["']/i,
+      /"grid_title":"([^"]+)"/i,
+      /"seo_title":"([^"]+)"/i
+    ];
+    for (const rx of titleRegexes) {
+      const tm = html.match(rx);
+      if (tm && tm[1]) { title = decodeHtml(tm[1]); break; }
+    }
+
+    /* ক্যাপশন / description */
+    const descRegexes = [
+      /<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i,
+      /<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i,
+      /<meta\s+name=["']twitter:description["']\s+content=["']([^"']+)["']/i,
+      /"description":"((?:[^"\\]|\\.)*)"/i,
+      /"seo_description":"((?:[^"\\]|\\.)*)"/i
+    ];
+    for (const rx of descRegexes) {
+      const dm = html.match(rx);
+      if (dm && dm[1]) {
+        description = decodeHtml(dm[1]).replace(/\\n/g, '\n').replace(/\\"/g, '"');
+        break;
+      }
+    }
+
+    /* উচ্চ-রেজ ইমেজ URL rewrite (236x → originals) */
+    if (imgUrlFound && /i\.pinimg\.com/.test(imgUrlFound)) {
+      imgUrlFound = imgUrlFound.replace(/\/(\d+x\d*|originals)\//, '/originals/');
+    }
 
     if (videoUrlFound || imgUrlFound) {
       return res.json({
-        success: true, platform: "pinterest", title,
+        success: true,
+        platform: "pinterest",
+        title: title || "Pinterest Pin",
+        caption: description || title || "",
+        description: description || "",
         cover_image: imgUrlFound || null,
+        thumbnail: imgUrlFound || null,
         download_url_no_watermark: videoUrlFound || imgUrlFound,
         download_url_hd: videoUrlFound || imgUrlFound,
         media_type: videoUrlFound ? 'video' : 'image'
@@ -468,10 +680,14 @@ app.get("/pin", async (req, res) => {
     }
   } catch (_) {}
 
-  // পদ্ধতি ২: pinterestdownloader.io API
+  /* পদ্ধতি ২: pinterestdownloader.io API */
   try {
     const r = await postWithRetry("https://pinterestdownloader.io/frontendService/DownloaderService", { url: videoUrl }, {
-      headers: { ...BROWSER_HEADERS, "Origin": "https://pinterestdownloader.io", "Referer": "https://pinterestdownloader.io/" }
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://pinterestdownloader.io",
+        "Referer": "https://pinterestdownloader.io/"
+      }
     });
     const data = r.data || {};
     if (data && (data.mediaList || data.data)) {
@@ -480,8 +696,12 @@ app.get("/pin", async (req, res) => {
       const url = first && (first.url || first.download_url);
       if (url) {
         return res.json({
-          success: true, platform: "pinterest", title: "Pinterest Pin",
+          success: true, platform: "pinterest",
+          title: first.title || data.title || "Pinterest Pin",
+          caption: first.description || data.description || "",
+          description: first.description || data.description || "",
           cover_image: first.image || first.thumbnail || null,
+          thumbnail: first.image || first.thumbnail || null,
           download_url_no_watermark: url,
           download_url_hd: url,
           media_type: /\.mp4/i.test(url) ? 'video' : 'image'
@@ -493,7 +713,7 @@ app.get("/pin", async (req, res) => {
   return res.status(404).json({ success: false, error: "Pinterest media রিসলভ করা যায়নি।" });
 });
 
-/* ────────── YouTube Video/Shorts (/yt) ────────── */
+/* ────────── YouTube Video/Shorts (/yt) — FIXED (multi-resolver) ────────── */
 app.get("/yt", async (req, res) => {
   const videoUrl = req.query.url;
   if (!videoUrl) return res.status(400).json({ success: false, error: "YouTube URL প্রদান করুন।" });
@@ -501,56 +721,128 @@ app.get("/yt", async (req, res) => {
     return res.status(400).json({ success: false, error: "সঠিক YouTube লিংক দিন।" });
   }
 
-  // পদ্ধতি ১: y2mate CDN endpoint
-  try {
-    const idMatch = videoUrl.match(/(?:v=|\/shorts\/|youtu\.be\/)([\w-]{11})/);
-    const vid = idMatch ? idMatch[1] : null;
-    if (vid) {
-      // Analyze
-      const r1 = await postWithRetry("https://www.y2mate.com/mates/analyzeV2/ajax", {
-        k_query: `https://www.youtube.com/watch?v=${vid}`,
-        k_page: "home", hl: "en", q_auto: "0"
-      }, {
-        headers: { ...BROWSER_HEADERS, "Origin": "https://www.y2mate.com", "Referer": "https://www.y2mate.com/" }
-      });
-      const info = r1.data || {};
-      const title = info.title || "YouTube Video";
-      const thumb = info.thumbnail || (vid ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : null);
-      const links = (info.links && (info.links.mp4 || info.links.MP4)) || {};
-      // best pick (720p বা তার নিচে)
-      let bestKey = null, bestQ = 0;
-      let audioKey = null;
-      Object.keys(links).forEach(k => {
-        const item = links[k];
-        const q = parseInt((item.q || '').replace(/\D/g,''), 10) || 0;
-        if (item.f === 'mp4' && q >= bestQ && q <= 1080) { bestQ = q; bestKey = item.k; }
-      });
-      const audios = (info.links && (info.links.mp3 || info.links.MP3)) || {};
-      Object.keys(audios).forEach(k => {
-        if (!audioKey) audioKey = audios[k].k;
-      });
+  const idMatch = videoUrl.match(/(?:v=|\/shorts\/|youtu\.be\/|\/embed\/)([\w-]{11})/);
+  const vid = idMatch ? idMatch[1] : null;
+  if (!vid) return res.status(400).json({ success: false, error: "YouTube video ID পাওয়া যায়নি।" });
 
-      async function convert(key){
+  const fullUrl = `https://www.youtube.com/watch?v=${vid}`;
+  const thumb = `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`;
+
+  /* meta info (title/author) — oembed থেকে */
+  let title = "YouTube Video", author = "YouTube";
+  try {
+    const meta = await axios.get(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(fullUrl)}&format=json`,
+      { timeout: 8000 }
+    );
+    if (meta.data) {
+      title  = meta.data.title       || title;
+      author = meta.data.author_name || author;
+    }
+  } catch (_) {}
+
+  const attempts = [];
+
+  /* ─── পদ্ধতি ১: cobalt.tools API (সবচেয়ে stable open-source) ─── */
+  try {
+    const r = await postJsonWithRetry("https://api.cobalt.tools/api/json", {
+      url: fullUrl,
+      vQuality: "720",
+      filenamePattern: "basic",
+      isAudioOnly: false
+    }, {
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://cobalt.tools",
+        "Referer": "https://cobalt.tools/",
+        "Accept": "application/json"
+      }
+    });
+    const d = r.data || {};
+    if (d.status === "stream" || d.status === "redirect" || d.status === "tunnel") {
+      const videoLink = d.url;
+      // audio
+      let audioLink = null;
+      try {
+        const ra = await postJsonWithRetry("https://api.cobalt.tools/api/json", {
+          url: fullUrl,
+          isAudioOnly: true,
+          aFormat: "mp3"
+        }, {
+          headers: {
+            ...BROWSER_HEADERS,
+            "Origin": "https://cobalt.tools",
+            "Referer": "https://cobalt.tools/",
+            "Accept": "application/json"
+          }
+        });
+        if (ra.data && (ra.data.status === "stream" || ra.data.status === "redirect" || ra.data.status === "tunnel")) {
+          audioLink = ra.data.url;
+        }
+      } catch (_) {}
+
+      return res.json({
+        success: true, platform: "youtube",
+        title, author,
+        cover_image: thumb,
+        download_url_no_watermark: videoLink,
+        download_url_hd: videoLink,
+        music_url: audioLink,
+        quality: "720p"
+      });
+    }
+    attempts.push("cobalt: status=" + (d.status || 'unknown'));
+  } catch (e) { attempts.push("cobalt err: " + (e.response ? e.response.status : e.code || 'net')); }
+
+  /* ─── পদ্ধতি ২: savetube.me API ─── */
+  try {
+    const r = await postJsonWithRetry("https://cdn.savetube.su/info", {
+      url: fullUrl
+    }, {
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://savetube.me",
+        "Referer": "https://savetube.me/"
+      }
+    });
+    const d = (r.data && r.data.data) || {};
+    if (d.id) {
+      /* ভিডিও ফরম্যাট থেকে best 720p বাছাই */
+      let bestKey = null;
+      const formats = d.video_formats || d.formats || [];
+      let bestQ = 0;
+      for (const f of formats) {
+        const q = parseInt(String(f.quality || f.label || '').replace(/\D/g, ''), 10) || 0;
+        if (q >= bestQ && q <= 1080) { bestQ = q; bestKey = f.key || f.k; }
+      }
+      const convert = async (key, isAudio) => {
         if (!key) return null;
         try {
-          const r2 = await postWithRetry("https://www.y2mate.com/mates/convertV2/index", {
-            vid, k: key
+          const rc = await postJsonWithRetry("https://cdn.savetube.su/download", {
+            id: d.id, key, downloadType: isAudio ? "audio" : "video"
           }, {
-            headers: { ...BROWSER_HEADERS, "Origin":"https://www.y2mate.com", "Referer":"https://www.y2mate.com/" }
+            headers: {
+              ...BROWSER_HEADERS,
+              "Origin": "https://savetube.me",
+              "Referer": "https://savetube.me/"
+            }
           });
-          return (r2.data && r2.data.dlink) || null;
-        } catch(e){ return null; }
-      }
-
-      const videoLink = await convert(bestKey);
-      const audioLink = await convert(audioKey);
+          return (rc.data && rc.data.data && rc.data.data.downloadUrl) || null;
+        } catch (_) { return null; }
+      };
+      const videoLink = await convert(bestKey, false);
+      /* audio */
+      let audioKey = null;
+      const audios = d.audio_formats || [];
+      if (audios.length) audioKey = audios[0].key || audios[0].k;
+      const audioLink = await convert(audioKey, true);
 
       if (videoLink || audioLink) {
         return res.json({
           success: true, platform: "youtube",
-          title,
-          author: info.a || "YouTube",
-          cover_image: thumb,
+          title: d.title || title,
+          author: d.author || author,
+          cover_image: d.thumbnail || thumb,
           download_url_no_watermark: videoLink,
           download_url_hd: videoLink,
           music_url: audioLink,
@@ -558,28 +850,77 @@ app.get("/yt", async (req, res) => {
         });
       }
     }
-  } catch (_) {}
+    attempts.push("savetube: no id");
+  } catch (e) { attempts.push("savetube err: " + (e.response ? e.response.status : e.code || 'net')); }
 
-  // পদ্ধতি ২: ssyoutube / savefrom-style ফলব্যাক (ID শুধু thumbnail)
+  /* ─── পদ্ধতি ৩: y2mate (পুরনো, ফলব্যাক) ─── */
   try {
-    const idMatch = videoUrl.match(/(?:v=|\/shorts\/|youtu\.be\/)([\w-]{11})/);
-    if (idMatch) {
-      const vid = idMatch[1];
-      const thumb = `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`;
+    const r1 = await postWithRetry("https://www.y2mate.com/mates/analyzeV2/ajax", {
+      k_query: fullUrl, k_page: "home", hl: "en", q_auto: "0"
+    }, {
+      headers: {
+        ...BROWSER_HEADERS,
+        "Origin": "https://www.y2mate.com",
+        "Referer": "https://www.y2mate.com/"
+      }
+    });
+    const info = r1.data || {};
+    const links = (info.links && (info.links.mp4 || info.links.MP4)) || {};
+    let bestKey = null, bestQ = 0;
+    Object.keys(links).forEach(k => {
+      const item = links[k];
+      const q = parseInt((item.q || '').replace(/\D/g,''), 10) || 0;
+      if (item.f === 'mp4' && q >= bestQ && q <= 1080) { bestQ = q; bestKey = item.k; }
+    });
+    let audioKey = null;
+    const audios = (info.links && (info.links.mp3 || info.links.MP3)) || {};
+    Object.keys(audios).forEach(k => { if (!audioKey) audioKey = audios[k].k; });
+
+    async function convert(key){
+      if (!key) return null;
+      try {
+        const r2 = await postWithRetry("https://www.y2mate.com/mates/convertV2/index", {
+          vid, k: key
+        }, {
+          headers: {
+            ...BROWSER_HEADERS,
+            "Origin":"https://www.y2mate.com",
+            "Referer":"https://www.y2mate.com/"
+          }
+        });
+        return (r2.data && r2.data.dlink) || null;
+      } catch(e){ return null; }
+    }
+    const videoLink = await convert(bestKey);
+    const audioLink = await convert(audioKey);
+
+    if (videoLink || audioLink) {
       return res.json({
         success: true, platform: "youtube",
-        title: "YouTube Video (Direct)",
-        author: "YouTube",
-        cover_image: thumb,
-        download_url_no_watermark: null,
-        download_url_hd: null,
-        music_url: null,
-        note: "সরাসরি ডাউনলোড লিংক তৈরি করা যায়নি — YouTube সার্ভার সাময়িকভাবে রিসলভার ব্লক করছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।"
+        title: info.title || title,
+        author: info.a || author,
+        cover_image: info.thumbnail || thumb,
+        download_url_no_watermark: videoLink,
+        download_url_hd: videoLink,
+        music_url: audioLink,
+        quality: bestQ ? (bestQ + 'p') : 'auto'
       });
     }
-  } catch (_) {}
+    attempts.push("y2mate: no dlink");
+  } catch (e) { attempts.push("y2mate err: " + (e.response ? e.response.status : e.code || 'net')); }
 
-  return res.status(404).json({ success: false, error: "YouTube ভিডিও রিসলভ করা যায়নি।" });
+  /* সব ফেইল হলে অন্তত thumbnail+meta পাঠাই, কিন্তু success:false */
+  return res.status(502).json({
+    success: false,
+    platform: "youtube",
+    title, author,
+    cover_image: thumb,
+    download_url_no_watermark: null,
+    download_url_hd: null,
+    music_url: null,
+    error: "সরাসরি ডাউনলোড লিংক তৈরি করা যায়নি — সব রিসলভার সাময়িকভাবে ব্লকড। কিছুক্ষণ পরে আবার চেষ্টা করুন।",
+    debug: attempts
+  });
 });
 
 /* ─── রুট (Health-check) ─────────────────────────────────────── */
